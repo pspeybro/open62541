@@ -32,7 +32,7 @@ static UA_ByteString loadCertificate(void) {
     UA_ByteString certificate = UA_STRING_NULL;
 	FILE *fp = NULL;
 	//FIXME: a potiential bug of locating the certificate, we need to get the path from the server's config
-	fp=fopen("localhost.der", "rb");
+	fp=fopen("server_cert.der", "rb");
 
 	if(!fp) {
         errno = 0; // we read errno also from the tcp layer...
@@ -54,7 +54,7 @@ static UA_ByteString loadCertificate(void) {
 }
 
 static void testCallback(UA_Server *server, void *data) {
-    logger.log_info(UA_LOGGERCATEGORY_USERLAND, "testcallback");
+    UA_LOG_INFO(logger, UA_LOGCATEGORY_USERLAND, "testcallback");
 }
 
 int main(int argc, char** argv) {
@@ -67,7 +67,6 @@ int main(int argc, char** argv) {
     UA_Server_setServerCertificate(server, certificate);
     UA_ByteString_deleteMembers(&certificate);
     UA_Server_addNetworkLayer(server, ServerNetworkLayerTCP_new(UA_ConnectionConfig_standard, 16664));
-    UA_UInt16 nsIndex = UA_Server_addNamespace(server, UA_ServerConfig_standard.Application_applicationURI);
 
     UA_WorkItem work = {.type = UA_WORKITEMTYPE_METHODCALL,
                         .work.methodCall = {.method = testCallback, .data = NULL} };
@@ -77,8 +76,8 @@ int main(int argc, char** argv) {
     UA_Variant *myIntegerVariant = UA_Variant_new();
     UA_Int32 myInteger = 42;
     UA_Variant_setScalarCopy(myIntegerVariant, &myInteger, &UA_TYPES[UA_TYPES_INT32]);
-    UA_QualifiedName myIntegerName = UA_QUALIFIEDNAME(nsIndex, "the answer");
-    UA_NodeId myIntegerNodeId = UA_NODEID_STRING(nsIndex, "the.answer"); /* UA_NODEID_NULL would assign a random free nodeid */
+    UA_QualifiedName myIntegerName = UA_QUALIFIEDNAME(1, "the answer");
+    UA_NodeId myIntegerNodeId = UA_NODEID_STRING(1, "the.answer"); /* UA_NODEID_NULL would assign a random free nodeid */
     UA_NodeId parentNodeId = UA_NODEID_NUMERIC(0, UA_NS0ID_OBJECTSFOLDER);
     UA_NodeId parentReferenceNodeId = UA_NODEID_NUMERIC(0, UA_NS0ID_ORGANIZES);
     UA_Server_addVariableNode(server, myIntegerVariant, myIntegerName,

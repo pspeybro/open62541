@@ -22,6 +22,10 @@ static void processHEL(UA_Connection *connection, const UA_ByteString *msg, size
     connection->remoteConf.maxMessageSize = helloMessage.maxMessageSize;
     connection->remoteConf.protocolVersion = helloMessage.protocolVersion;
     connection->remoteConf.recvBufferSize = helloMessage.receiveBufferSize;
+    if(connection->localConf.sendBufferSize > helloMessage.receiveBufferSize)
+        connection->localConf.sendBufferSize = helloMessage.receiveBufferSize;
+    if(connection->localConf.recvBufferSize > helloMessage.sendBufferSize)
+        connection->localConf.recvBufferSize = helloMessage.sendBufferSize;
     connection->remoteConf.sendBufferSize = helloMessage.sendBufferSize;
     connection->state = UA_CONNECTION_ESTABLISHED;
     UA_TcpHelloMessage_deleteMembers(&helloMessage);
@@ -103,16 +107,21 @@ static void processOPN(UA_Connection *connection, UA_Server *server, const UA_By
 
     UA_ByteString resp_msg;
     retval = connection->getBuffer(connection, &resp_msg, respHeader.messageHeader.messageSize);
-
+    if(retval != UA_STATUSCODE_GOOD) {
+        UA_OpenSecureChannelResponse_deleteMembers(&p);
+        UA_AsymmetricAlgorithmSecurityHeader_deleteMembers(&asymHeader);
+        return;
+    }
+        
     size_t tmpPos = 0;
     UA_SecureConversationMessageHeader_encodeBinary(&respHeader, &resp_msg, &tmpPos);
     UA_AsymmetricAlgorithmSecurityHeader_encodeBinary(&asymHeader, &resp_msg, &tmpPos); // just mirror back
     UA_SequenceHeader_encodeBinary(&seqHeader, &resp_msg, &tmpPos); // just mirror back
     UA_NodeId_encodeBinary(&responseType, &resp_msg, &tmpPos);
     UA_OpenSecureChannelResponse_encodeBinary(&p, &resp_msg, &tmpPos);
-
     UA_OpenSecureChannelResponse_deleteMembers(&p);
     UA_AsymmetricAlgorithmSecurityHeader_deleteMembers(&asymHeader);
+
     connection->write(connection, &resp_msg);
     connection->releaseBuffer(connection, &resp_msg);
 }
@@ -128,18 +137,23 @@ static void invoke_service(UA_Server *server, UA_SecureChannel *channel,
                            UA_RequestHeader *request, UA_ResponseHeader *response,
                            void (*service)(UA_Server*, UA_Session*, void*, void*)) {
     init_response_header(request, response);
-    if(!channel->session ||
-        !UA_NodeId_equal(&channel->session->authenticationToken,
-                         &request->authenticationToken))
+    /* try to get the session from the securechannel first */
+    UA_Session *session = UA_SecureChannel_getSession(channel, &request->authenticationToken);
+    if(!session)
+        session = UA_SessionManager_getSession(&server->sessionManager, &request->authenticationToken);
+    if(!session)
         response->serviceResult = UA_STATUSCODE_BADSESSIONIDINVALID;
-    else if(channel->session->channel != channel)
-            response->serviceResult = UA_STATUSCODE_BADSECURECHANNELIDINVALID;
-    else if(channel->session->activated == UA_FALSE)
-            response->serviceResult = UA_STATUSCODE_BADSESSIONNOTACTIVATED;
+    else if(session->activated == UA_FALSE) {
+        response->serviceResult = UA_STATUSCODE_BADSESSIONNOTACTIVATED;
+        /* the session is invalidated */
+        UA_SessionManager_removeSession(&server->sessionManager, &request->authenticationToken);
+    }
+    else if(session->channel != channel)
+        response->serviceResult = UA_STATUSCODE_BADSESSIONIDINVALID;
     else {
-            UA_Session_updateLifetime(channel->session);
-            service(server, channel->session, request, response);
-        }
+            UA_Session_updateLifetime(session);
+            service(server, session, request, response);
+    }
 }
 
 #define INVOKE_SERVICE(TYPE) do {                                       \
@@ -330,9 +344,10 @@ static void processMSG(UA_Connection *connection, UA_Server *server, const UA_By
 
     default: {
         if(requestType.namespaceIndex == 0 && requestType.identifier.numeric==787){
-            UA_LOG_INFO(server->logger, UA_LOGGERCATEGORY_COMMUNICATION, "Client requested a subscription that are not supported, the message will be skipped");
+            UA_LOG_INFO(server->logger, UA_LOGCATEGORY_COMMUNICATION,
+                        "Client requested a subscription that are not supported, the message will be skipped");
         }else{
-            UA_LOG_INFO(server->logger, UA_LOGGERCATEGORY_COMMUNICATION, "Unknown request: NodeId(ns=%d, i=%d)",
+            UA_LOG_INFO(server->logger, UA_LOGCATEGORY_COMMUNICATION, "Unknown request: NodeId(ns=%d, i=%d)",
                         requestType.namespaceIndex, requestType.identifier.numeric);
         }
         UA_RequestHeader  p;
@@ -389,7 +404,7 @@ void UA_Server_processBinaryMessage(UA_Server *server, UA_Connection *connection
     UA_TcpMessageHeader tcpMessageHeader;
     do {
         if(UA_TcpMessageHeader_decodeBinary(msg, &pos, &tcpMessageHeader) != UA_STATUSCODE_GOOD) {
-            UA_LOG_INFO(server->logger, UA_LOGGERCATEGORY_COMMUNICATION, "Decoding of message header failed");
+            UA_LOG_INFO(server->logger, UA_LOGCATEGORY_COMMUNICATION, "Decoding of message header failed");
             connection->close(connection);
             break;
         }
@@ -422,7 +437,7 @@ void UA_Server_processBinaryMessage(UA_Server *server, UA_Connection *connection
 
         UA_TcpMessageHeader_deleteMembers(&tcpMessageHeader);
         if(pos != targetpos) {
-            UA_LOG_INFO(server->logger, UA_LOGGERCATEGORY_COMMUNICATION,
+            UA_LOG_INFO(server->logger, UA_LOGCATEGORY_COMMUNICATION,
                         "The message was not entirely processed, skipping to the end");
             pos = targetpos;
         }

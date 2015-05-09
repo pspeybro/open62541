@@ -12,7 +12,7 @@
  *    all previous work has actually finished (only for multithreading)
  */
 
-#define MAXTIMEOUT 5000 // max timeout in microsec until the next main loop iteration
+#define MAXTIMEOUT 50000 // max timeout in microsec until the next main loop iteration
 #define BATCHSIZE 20 // max size of worklists that are dispatched to workers
 
 static void processWork(UA_Server *server, UA_WorkItem *work, size_t workSize) {
@@ -135,77 +135,98 @@ static void emptyDispatchQueue(UA_Server *server) {
 /* Timed Work */
 /**************/
 
+/**
+ * The TimedWork structure contains an array of workitems that are either executed at the same time
+ * or in the same repetition inverval. The linked list is sorted, so we can stop traversing when the
+ * first element has nextTime > now.
+ */
 struct TimedWork {
     LIST_ENTRY(TimedWork) pointers;
     UA_DateTime nextTime;
-    UA_UInt32 interval; ///> in ms resolution, 0 means no repetition
+    UA_UInt32 interval; ///> in 100ns resolution, 0 means no repetition
     size_t workSize;
     UA_WorkItem *work;
     UA_Guid workIds[];
 };
 
-/* The item is copied and not freed by this function. The interval is in 100ns (as UA_DateTime) */
+/* Traverse the list until there is a TimedWork to which the item can be added or we reached the
+   end. The item is copied into the TimedWork and not freed by this function. The interval is in
+   100ns resolution */
 static UA_StatusCode addTimedWork(UA_Server *server, const UA_WorkItem *item, UA_DateTime firstTime,
                                   UA_UInt32 interval, UA_Guid *resultWorkGuid) {
-    struct TimedWork *lastTw = UA_NULL, *matchingTw = UA_NULL;
+    struct TimedWork *matchingTw = UA_NULL; // add the item here
+    struct TimedWork *lastTw = UA_NULL; // if there is no matchingTw, add a new TimedWork after this entry
+    struct TimedWork *tempTw;
+
     /* search for matching entry */
+    tempTw = LIST_FIRST(&server->timedWork);
     if(interval == 0) {
-        LIST_FOREACH(lastTw, &server->timedWork, pointers) {
-            if(lastTw->nextTime == firstTime) {
-                if(lastTw->nextTime == firstTime)
-                    matchingTw = lastTw;
+        /* single execution. the time needs to match */
+        while(tempTw) {
+            if(tempTw->nextTime >= firstTime) {
+                if(tempTw->nextTime == firstTime)
+                    matchingTw = tempTw;
                 break;
             }
+            lastTw = tempTw;
+            tempTw = LIST_NEXT(lastTw, pointers);
         }
     } else {
-        LIST_FOREACH(matchingTw, &server->timedWork, pointers) {
-            if(interval == matchingTw->interval)
+        /* repeated execution. the interval needs to match */
+        while(tempTw) {
+            if(interval == tempTw->interval) {
+                matchingTw = tempTw;
                 break;
+            }
+            if(tempTw->nextTime > firstTime)
+                break;
+            lastTw = tempTw;
+            tempTw = LIST_NEXT(lastTw, pointers);
         }
     }
     
-    struct TimedWork *newWork;
     if(matchingTw) {
         /* append to matching entry */
-        newWork = UA_realloc(matchingTw, sizeof(struct TimedWork) + sizeof(UA_Guid)*(matchingTw->workSize + 1));
-        if(!newWork)
+        matchingTw = UA_realloc(matchingTw, sizeof(struct TimedWork) + sizeof(UA_Guid)*(matchingTw->workSize + 1));
+        if(!matchingTw)
             return UA_STATUSCODE_BADOUTOFMEMORY;
-        if(newWork->pointers.le_next)
-            newWork->pointers.le_next->pointers.le_prev = &newWork->pointers.le_next;
-        if(newWork->pointers.le_prev)
-            *newWork->pointers.le_prev = newWork;
-        UA_WorkItem *newItems = UA_realloc(newWork->work, sizeof(UA_WorkItem)*(matchingTw->workSize + 1));
+        if(matchingTw->pointers.le_next)
+            matchingTw->pointers.le_next->pointers.le_prev = &matchingTw->pointers.le_next;
+        if(matchingTw->pointers.le_prev)
+            *matchingTw->pointers.le_prev = matchingTw;
+        UA_WorkItem *newItems = UA_realloc(matchingTw->work, sizeof(UA_WorkItem)*(matchingTw->workSize + 1));
         if(!newItems)
             return UA_STATUSCODE_BADOUTOFMEMORY;
-        newWork->work = newItems;
+        matchingTw->work = newItems;
     } else {
         /* create a new entry */
-        newWork = UA_malloc(sizeof(struct TimedWork) + sizeof(UA_Guid));
-        if(!newWork)
+        matchingTw = UA_malloc(sizeof(struct TimedWork) + sizeof(UA_Guid));
+        if(!matchingTw)
             return UA_STATUSCODE_BADOUTOFMEMORY;
-        newWork->work = UA_malloc(sizeof(UA_WorkItem));
-        if(!newWork->work) {
-            UA_free(newWork);
+        matchingTw->work = UA_malloc(sizeof(UA_WorkItem));
+        if(!matchingTw->work) {
+            UA_free(matchingTw);
             return UA_STATUSCODE_BADOUTOFMEMORY;
         }
-        newWork->workSize = 0;
-        newWork->nextTime = firstTime;
-        newWork->interval = interval;
+        matchingTw->workSize = 0;
+        matchingTw->nextTime = firstTime;
+        matchingTw->interval = interval;
         if(lastTw)
-            LIST_INSERT_AFTER(lastTw, newWork, pointers);
+            LIST_INSERT_AFTER(lastTw, matchingTw, pointers);
         else
-            LIST_INSERT_HEAD(&server->timedWork, newWork, pointers);
+            LIST_INSERT_HEAD(&server->timedWork, matchingTw, pointers);
     }
+    matchingTw->work[matchingTw->workSize] = *item;
+    matchingTw->workSize++;
+
+    /* create a guid for finding and deleting the timed work later on */
     if(resultWorkGuid) {
-        newWork->workIds[newWork->workSize] = UA_Guid_random(&server->random_seed);
-        *resultWorkGuid = newWork->workIds[matchingTw->workSize];
+        matchingTw->workIds[matchingTw->workSize] = UA_Guid_random(&server->random_seed);
+        *resultWorkGuid = matchingTw->workIds[matchingTw->workSize];
     }
-    newWork->work[newWork->workSize] = *item;
-    newWork->workSize++;
     return UA_STATUSCODE_GOOD;
 }
 
-// Currently, these functions need to get the server mutex, but should be sufficiently fast
 UA_StatusCode UA_Server_addTimedWorkItem(UA_Server *server, const UA_WorkItem *work, UA_DateTime executionTime,
                                          UA_Guid *resultWorkGuid) {
     return addTimedWork(server, work, executionTime, 0, resultWorkGuid);

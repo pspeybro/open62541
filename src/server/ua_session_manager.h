@@ -7,8 +7,8 @@
 #include "ua_session.h"
 
 typedef struct session_list_entry {
-    UA_Session session;
     LIST_ENTRY(session_list_entry) pointers;
+    UA_Session session;
 } session_list_entry;
 
 typedef struct UA_SessionManager {
@@ -24,11 +24,13 @@ UA_StatusCode UA_SessionManager_init(UA_SessionManager *sessionManager, UA_UInt3
 
 void UA_SessionManager_deleteMembers(UA_SessionManager *sessionManager);
 
-UA_StatusCode UA_SessionManager_createSession(UA_SessionManager *sessionManager,
-                                              UA_SecureChannel *channel, const UA_CreateSessionRequest *request, UA_Session **session);
+void UA_SessionManager_cleanupTimedOut(UA_SessionManager *sessionManager, UA_DateTime now);
 
-UA_StatusCode UA_SessionManager_removeSession(UA_SessionManager *sessionManager,
-                                              const UA_NodeId *sessionId);
+UA_StatusCode UA_SessionManager_createSession(UA_SessionManager *sessionManager,
+                                              UA_SecureChannel *channel, const UA_CreateSessionRequest *request,
+                                              UA_Session **session);
+
+UA_StatusCode UA_SessionManager_removeSession(UA_SessionManager *sessionManager, const UA_NodeId *token);
 
 /** Finds the session which is identified by the authentication token */
 UA_Session * UA_SessionManager_getSession(UA_SessionManager *sessionManager, const UA_NodeId *token);

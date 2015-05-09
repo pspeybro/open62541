@@ -31,7 +31,7 @@ struct UA_Client {
     UA_ClientConfig config;
 };
 
-const UA_ClientConfig UA_ClientConfig_standard =
+const UA_EXPORT UA_ClientConfig UA_ClientConfig_standard =
     { 5 /* ms receive timout */, {.protocolVersion = 0, .sendBufferSize = 65536, .recvBufferSize  = 65536,
                                   .maxMessageSize = 65536, .maxChunkCount = 1}};
 
@@ -202,9 +202,9 @@ static UA_StatusCode SecureChannelHandshake(UA_Client *client) {
     UA_AsymmetricAlgorithmSecurityHeader_decodeBinary(&reply, &offset, &asymHeader);
     UA_SequenceHeader_decodeBinary(&reply, &offset, &seqHeader);
     UA_NodeId_decodeBinary(&reply, &offset, &requestType);
-
-    if(!UA_NodeId_equal(&requestType, &UA_NODEID_NUMERIC(0, UA_NS0ID_OPENSECURECHANNELRESPONSE +
-                                                         UA_ENCODINGOFFSET_BINARY))) {
+    UA_NodeId expectedRequest = UA_NODEID_NUMERIC(0, UA_NS0ID_OPENSECURECHANNELRESPONSE +
+                                                  UA_ENCODINGOFFSET_BINARY);
+    if(!UA_NodeId_equal(&requestType, &expectedRequest)) {
         client->connection.releaseBuffer(&client->connection, &reply);
         UA_AsymmetricAlgorithmSecurityHeader_deleteMembers(&asymHeader);
         UA_NodeId_deleteMembers(&requestType);
@@ -235,6 +235,8 @@ static void sendReceiveRequest(UA_RequestHeader *request, const UA_DataType *req
                                UA_Boolean sendOnly) {
     if(response)
         UA_init(response, responseType);
+    else
+        return;
 
     UA_NodeId_copy(&client->authenticationToken, &request->authenticationToken);
 
@@ -265,7 +267,8 @@ static void sendReceiveRequest(UA_RequestHeader *request, const UA_DataType *req
     UA_ByteString message;
     UA_StatusCode retval = client->connection.getBuffer(&client->connection, &message, msgHeader.messageHeader.messageSize);
     if(retval != UA_STATUSCODE_GOOD) {
-        // todo
+        // todo: print error message
+        return;
     }
 
     size_t offset = 0;
@@ -309,9 +312,9 @@ static void sendReceiveRequest(UA_RequestHeader *request, const UA_DataType *req
     retval |= UA_SequenceHeader_decodeBinary(&reply, &offset, &seqHeader);
     UA_NodeId responseId;
     retval |= UA_NodeId_decodeBinary(&reply, &offset, &responseId);
-
-    if(!UA_NodeId_equal(&responseId, &UA_NODEID_NUMERIC(0, responseType->typeId.identifier.numeric +
-                                                       UA_ENCODINGOFFSET_BINARY))) {
+    UA_NodeId expectedNodeId = UA_NODEID_NUMERIC(0, responseType->typeId.identifier.numeric +
+                                                 UA_ENCODINGOFFSET_BINARY);
+    if(!UA_NodeId_equal(&responseId, &expectedNodeId)) {
         client->connection.releaseBuffer(&client->connection, &reply);
         UA_SymmetricAlgorithmSecurityHeader_deleteMembers(&symHeader);
         respHeader->serviceResult = retval;
